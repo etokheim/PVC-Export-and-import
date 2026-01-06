@@ -560,10 +560,7 @@ install_pending_dependencies() {
   fi
 }
 
-# Check dependencies (prompts only, no install yet)
-check_and_prompt_dependencies
-
-# Parse arguments
+# Parse arguments first (so --help and --version work without dependency checks)
 NAMESPACE="default"
 OUTPUT_DIR="."
 PVC_NAMES=()
@@ -635,6 +632,9 @@ if [ ${#PVC_NAMES[@]} -eq 0 ]; then
   echo "Example: $0 -o /backup pvc1 pvc2"
   exit 1
 fi
+
+# Check dependencies (prompts only, no install yet)
+check_and_prompt_dependencies
 
 # Validate and prepare output directory
 OUTPUT_DIR=$(realpath "${OUTPUT_DIR}" 2>/dev/null || echo "${OUTPUT_DIR}")
