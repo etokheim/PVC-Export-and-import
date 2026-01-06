@@ -139,7 +139,8 @@ log() {
   shift
   local message="$@"
   local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-  local log_entry="[${timestamp}] [${level^^}] ${message}"
+  local level_upper=$(echo "${level}" | tr '[:lower:]' '[:upper:]')
+  local log_entry="[${timestamp}] [${level_upper}] ${message}"
   
   # Write to log file if initialized
   if [ -n "${LOG_FILE}" ] && [ -f "${LOG_FILE}" ]; then
