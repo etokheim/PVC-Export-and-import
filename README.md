@@ -2,6 +2,8 @@
 
 A robust bash script for exporting Kubernetes PersistentVolumeClaim (PVC) contents to compressed tar.gz archives. Automatically detects and supports both MicroK8s and standard Kubernetes distributions.
 
+I have used it successfully to export PVCs ranging from small to larger than a terabyte. Worked out great!
+
 **Keywords**: Kubernetes backup, PVC export, persistent volume backup, Kubernetes data export, MicroK8s backup, PVC backup script, Kubernetes volume export, persistent volume claim backup, k8s backup tool, container storage backup, Kubernetes data migration, PVC snapshot, volume backup automation
 
 ## Features
