@@ -1,0 +1,10 @@
+==========================================
+PVC Import Script - Log Started
+==========================================
+Timestamp: Tue Jan  6 20:45:29 CET 2026
+Script: ./pv-import.sh
+PID: 81006
+User: etokheim
+Log file: /Users/etokheim/dev/PVC-Export-and-import/logs/pv-import-20260106-204529.log
+Pod logs: /Users/etokheim/dev/PVC-Export-and-import/logs/pod_logs
+

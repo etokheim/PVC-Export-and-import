@@ -302,8 +302,17 @@ cleanup() {
   fi
 }
 
-# Set trap for cleanup on exit/interrupt
-trap cleanup EXIT INT TERM
+# Handle interrupt signals (Ctrl+C)
+handle_interrupt() {
+  echo ""
+  echo "🛑 Interrupted by user"
+  cleanup
+  exit 130
+}
+
+# Set trap for cleanup on exit, and interrupt handler for INT/TERM
+trap cleanup EXIT
+trap handle_interrupt INT TERM
 
 # Detect kubectl command (microk8s kubectl or regular kubectl)
 detect_kubectl() {
