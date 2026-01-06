@@ -714,6 +714,12 @@ get_namespaces() {
   ${KUBECTL_CMD} get namespaces -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort
 }
 
+# Get list of PVCs in a namespace
+get_pvcs_in_namespace() {
+  local namespace=$1
+  ${KUBECTL_CMD} get pvc -n "${namespace}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | sort
+}
+
 # Check if PVC exists
 pvc_exists() {
   local pvc_name=$1
@@ -881,11 +887,34 @@ prompt_for_target() {
   local storage_class=""
   local pvc_size=""
   
+  # Get existing PVCs in the namespace
+  local existing_pvcs=($(get_pvcs_in_namespace "${target_namespace}"))
+  
   echo "📦 Enter target PVC name:"
+  if [ ${#existing_pvcs[@]} -gt 0 ]; then
+    echo "   Existing PVCs in '${target_namespace}':"
+    local pvc_idx=1
+    for pvc in "${existing_pvcs[@]}"; do
+      local marker=""
+      if [ "${pvc}" = "${suggested_pvc_name}" ]; then
+        marker=" (suggested)"
+      fi
+      echo "     ${pvc_idx}) ${pvc}${marker}"
+      pvc_idx=$((pvc_idx + 1))
+    done
+    echo ""
+  else
+    echo "   (No existing PVCs in namespace '${target_namespace}')"
+    echo ""
+  fi
+  
   while true; do
-    read -p "   PVC name [${suggested_pvc_name}]: " pvc_input
+    read -p "   PVC name or number [${suggested_pvc_name}]: " pvc_input
     if [ -z "${pvc_input}" ]; then
       target_pvc="${suggested_pvc_name}"
+    elif [[ "${pvc_input}" =~ ^[0-9]+$ ]] && [ ${#existing_pvcs[@]} -gt 0 ] && [ "${pvc_input}" -ge 1 ] && [ "${pvc_input}" -le ${#existing_pvcs[@]} ]; then
+      # User entered a number - select from existing PVCs
+      target_pvc="${existing_pvcs[$((pvc_input - 1))]}"
     else
       target_pvc="${pvc_input}"
     fi
