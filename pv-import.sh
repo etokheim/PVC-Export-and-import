@@ -1603,9 +1603,6 @@ if [ ! -t 0 ]; then
   exit 1
 fi
 
-# Now install any pending dependencies
-install_pending_dependencies
-
 # Initialize logging
 init_log_file
 if [ -n "${LOG_FILE}" ]; then
@@ -1694,6 +1691,9 @@ if [[ "${confirm}" =~ ^[Nn]$ ]]; then
   echo "Import cancelled."
   exit 0
 fi
+
+# Now install any pending dependencies (after user has confirmed)
+install_pending_dependencies
 
 # Execute imports
 echo ""
