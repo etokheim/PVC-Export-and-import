@@ -19,7 +19,7 @@ set -e
 set -u
 
 # Script version
-SCRIPT_VERSION="2.1"
+SCRIPT_VERSION="2.2"
 
 # Get script directory for log file
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +31,7 @@ FAILED_EXPORTS=()
 VERBOSE=false
 KUBECTL_CMD=""  # Will be set by detect_kubectl()
 INTERRUPTED=false  # Track if script was interrupted
-UNCOMPRESSED=false  # Use uncompressed tar for very large PVCs
+EXPORT_FORMAT="compressed"  # Export format: "compressed" (.tar.gz), "uncompressed" (.tar), or "folder"
 LOG_FILE=""  # Will be set when logging is initialized
 
 # Log directories
@@ -628,7 +628,11 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --uncompressed)
-      UNCOMPRESSED=true
+      EXPORT_FORMAT="uncompressed"
+      shift
+      ;;
+    --folder)
+      EXPORT_FORMAT="folder"
       shift
       ;;
     -V|--version)
@@ -644,6 +648,8 @@ while [[ $# -gt 0 ]]; do
       echo "  -v, --verbose      Enable verbose output"
       echo "  --uncompressed     Use uncompressed tar (faster, less memory, larger files)"
       echo "                     Recommended for very large PVCs (>1TB)"
+      echo "  --folder           Export to plain folder (no archive, uses kubectl cp)"
+      echo "                     Best for quick access to files without extraction"
       echo "  -V, --version      Show version information"
       echo "  -h, --help         Show this help message"
       echo ""
@@ -756,12 +762,18 @@ export_pvc() {
   
   # Sanitize PVC name for filename (replace special chars with underscore)
   SANITIZED_PVC_NAME=$(echo "${PVC_NAME}" | sed 's/[^a-zA-Z0-9._-]/_/g')
-  if [ "${UNCOMPRESSED}" = "true" ]; then
+  if [ "${EXPORT_FORMAT}" = "folder" ]; then
+    OUTPUT_PATH="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED_PVC_NAME}"
+    OUTPUT_FILE="${OUTPUT_PATH}"  # For compatibility with existing code
+    log_output "📁 Using folder export (plain directory)"
+  elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
     OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED_PVC_NAME}.tar"
+    OUTPUT_PATH="${OUTPUT_FILE}"
     TAR_COMPRESS_FLAG=""
     log_output "📦 Using uncompressed export (faster, less memory, larger output file)"
   else
     OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED_PVC_NAME}.tar.gz"
+    OUTPUT_PATH="${OUTPUT_FILE}"
     TAR_COMPRESS_FLAG="z"
   fi
   # Pod name: Kubernetes pod names must be lowercase, alphanumeric with hyphens, max 63 chars
@@ -820,7 +832,9 @@ export_pvc() {
     if [ "$AVAILABLE_SPACE_KB" != "0" ] && [ "$AVAILABLE_SPACE_KB" -lt 1048576 ]; then
       AVAILABLE_SPACE_GB=$(awk "BEGIN {printf \"%.1f\", $AVAILABLE_SPACE_KB/1024/1024}")
       echo "⚠️  Warning: Low disk space detected (${AVAILABLE_SPACE_GB} GB available)."
-      if [ "${UNCOMPRESSED}" = "true" ]; then
+      if [ "${EXPORT_FORMAT}" = "folder" ]; then
+        echo "   Export may fail if there's not enough space for the folder backup."
+      elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
         echo "   Export may fail if there's not enough space for the uncompressed backup."
       else
         echo "   Export may fail if there's not enough space for the compressed backup."
@@ -853,15 +867,15 @@ export_pvc() {
       # Very large PVCs (>1TB) - use 16Gi memory
       MEMORY_LIMIT="16Gi"
       log_output "⚠️  Extremely large PVC detected (${PVC_SIZE}). Using maximum memory limit (${MEMORY_LIMIT})"
-      if [ "${UNCOMPRESSED}" != "true" ]; then
-        log_output "   💡 Tip: Consider using --uncompressed flag for faster export with less memory usage"
+      if [ "${EXPORT_FORMAT}" = "compressed" ]; then
+        log_output "   💡 Tip: Consider using --uncompressed or --folder flag for faster export with less memory usage"
         log_output "   Example: $0 --uncompressed -o ${OUTPUT_DIR} ${PVC_NAME}"
       fi
     elif [ "${PVC_SIZE_GI}" -gt 500 ]; then
       MEMORY_LIMIT="8Gi"
       log_output "⚠️  Very large PVC detected (${PVC_SIZE}). Using increased memory limit (${MEMORY_LIMIT})"
-      if [ "${PVC_SIZE_GI}" -gt 800 ] && [ "${UNCOMPRESSED}" != "true" ]; then
-        log_output "   💡 Tip: For PVCs >800Gi, consider using --uncompressed flag to reduce memory usage"
+      if [ "${PVC_SIZE_GI}" -gt 800 ] && [ "${EXPORT_FORMAT}" = "compressed" ]; then
+        log_output "   💡 Tip: For PVCs >800Gi, consider using --uncompressed or --folder flag to reduce memory usage"
       fi
     elif [ "${PVC_SIZE_GI}" -gt 100 ]; then
       MEMORY_LIMIT="4Gi"
@@ -1012,17 +1026,50 @@ export_pvc() {
   log_output "📥 Exporting data..."
   EXPORT_START=$(date +%s)
   
-  # Check if pv (pipe viewer) is available for progress
-  if command -v pv &> /dev/null; then
+  # Handle folder export differently
+  if [ "${EXPORT_FORMAT}" = "folder" ]; then
+    # Create output directory
+    mkdir -p "${OUTPUT_PATH}"
+    log debug "Starting folder export to ${OUTPUT_PATH}"
+    
+    # Use kubectl cp to copy files from pod to local folder
+    TEMP_ERROR_FILE=$(mktemp)
+    CURRENT_TEMP_ERROR_FILE="${TEMP_ERROR_FILE}"
+    set +e
+    ${KUBECTL_CMD} cp "${NAMESPACE}/${POD_NAME}:/data/." "${OUTPUT_PATH}/" 2>"${TEMP_ERROR_FILE}"
+    EXIT_CODE=$?
+    set -e
+    
+    if [ $EXIT_CODE -ne 0 ]; then
+      if [ -s "${TEMP_ERROR_FILE}" ]; then
+        log_output ""
+        log_output "📋 Error output:"
+        cat "${TEMP_ERROR_FILE}" | while read line; do log_output "$line"; done
+      fi
+      rm -f "${TEMP_ERROR_FILE}"
+      log_output ""
+      log_output "❌ Folder export failed (exit code: ${EXIT_CODE})"
+      log_output ""
+      log_output "📋 Checking pod status..."
+      ${KUBECTL_CMD} get pod "${POD_NAME}" -n "${NAMESPACE}" | while read line; do log_output "$line"; done
+      save_pod_logs "${POD_NAME}" "${NAMESPACE}" "${PVC_NAME}"
+      ${KUBECTL_CMD} delete pod "${POD_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
+      # Clean up partial folder on failure
+      rm -rf "${OUTPUT_PATH}"
+      return 1
+    fi
+    rm -f "${TEMP_ERROR_FILE}"
+  # Check if pv (pipe viewer) is available for progress (for tar exports)
+  elif command -v pv &> /dev/null; then
     # Use pv for progress if available
     # Note: pv -s expects bytes, but PVC_SIZE is human-readable, so we'll let pv estimate
     # Redirect stderr to a temp file to capture errors separately
     TEMP_ERROR_FILE=$(mktemp)
     CURRENT_TEMP_ERROR_FILE="${TEMP_ERROR_FILE}"
-    log debug "Starting export with pv, temp error file: ${TEMP_ERROR_FILE}, compressed: $([ "${UNCOMPRESSED}" = "true" ] && echo "no" || echo "yes")"
+    log debug "Starting export with pv, temp error file: ${TEMP_ERROR_FILE}, format: ${EXPORT_FORMAT}"
     # Use set +e temporarily for pipe handling
     set +e
-    if [ "${UNCOMPRESSED}" = "true" ]; then
+    if [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
       ${KUBECTL_CMD} exec "${POD_NAME}" -n "${NAMESPACE}" -- tar -cf - -C /data . 2>"${TEMP_ERROR_FILE}" | \
         pv -p -t -e -r -b > "${OUTPUT_FILE}"
     else
@@ -1082,10 +1129,10 @@ export_pvc() {
     # Clean up temp error file on success
     rm -f "${TEMP_ERROR_FILE}"
   else
-    # Fallback: show file size growth with spinner and speed
+    # Fallback: show file size growth with spinner and speed (for tar exports without pv)
     log_output "   (Install 'pv' for better progress indication)"
-    log debug "Starting export without pv, output file: ${OUTPUT_FILE}, compressed: $([ "${UNCOMPRESSED}" = "true" ] && echo "no" || echo "yes")"
-    if [ "${UNCOMPRESSED}" = "true" ]; then
+    log debug "Starting export without pv, output file: ${OUTPUT_FILE}, format: ${EXPORT_FORMAT}"
+    if [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
       ${KUBECTL_CMD} exec "${POD_NAME}" -n "${NAMESPACE}" -- tar -cf - -C /data . > "${OUTPUT_FILE}" 2>&1 &
     else
       ${KUBECTL_CMD} exec "${POD_NAME}" -n "${NAMESPACE}" -- tar -czf - -C /data . > "${OUTPUT_FILE}" 2>&1 &
@@ -1212,11 +1259,31 @@ export_pvc() {
   CURRENT_TEMP_ERROR_FILE=""
   
   # Verify and show results
-  if [ -f "${OUTPUT_FILE}" ] && [ -s "${OUTPUT_FILE}" ]; then
+  if [ "${EXPORT_FORMAT}" = "folder" ]; then
+    # For folder exports, check if directory exists and has content
+    if [ -d "${OUTPUT_PATH}" ]; then
+      FOLDER_SIZE=$(du -sh "${OUTPUT_PATH}" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      FILE_COUNT=$(find "${OUTPUT_PATH}" -type f 2>/dev/null | wc -l | tr -d ' ')
+      
+      log_output "=========================================="
+      log_output "✅ Export completed successfully!"
+      log_output "=========================================="
+      log_output "  Output folder:  ${OUTPUT_PATH}"
+      log_output "  Folder size:    ${FOLDER_SIZE}"
+      log_output "  File count:     ${FILE_COUNT} files"
+      log_output "  Duration:       ${EXPORT_DURATION} seconds"
+    else
+      log_output "=========================================="
+      log_output "❌ Export failed!"
+      log_output "=========================================="
+      log_output "  Output folder is missing"
+      return 1
+    fi
+  elif [ -f "${OUTPUT_FILE}" ] && [ -s "${OUTPUT_FILE}" ]; then
     FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null || echo "0")
     FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE/1024/1024}")
     FILE_SIZE_GB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE/1024/1024/1024}")
-    
+
     log_output "=========================================="
     log_output "✅ Export completed successfully!"
     log_output "=========================================="
@@ -1264,7 +1331,9 @@ pre_check_pvcs() {
     
     # Sanitize PVC name for filename
     SANITIZED_PVC_NAME=$(echo "${PVC_NAME}" | sed 's/[^a-zA-Z0-9._-]/_/g')
-    if [ "${UNCOMPRESSED}" = "true" ]; then
+    if [ "${EXPORT_FORMAT}" = "folder" ]; then
+      OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED_PVC_NAME}"
+    elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
       OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED_PVC_NAME}.tar"
     else
       OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED_PVC_NAME}.tar.gz"
@@ -1300,8 +1369,8 @@ pre_check_pvcs() {
       fi
     fi
     
-    # Check for existing output files
-    if [ -f "${OUTPUT_FILE}" ]; then
+    # Check for existing output files/folders
+    if [ -f "${OUTPUT_FILE}" ] || [ -d "${OUTPUT_FILE}" ]; then
       OVERWRITE_PVCS+=("${PVC_ENTRY}|${OUTPUT_FILE}")
     fi
     
@@ -1468,7 +1537,9 @@ if command -v df &> /dev/null; then
   if [ "$AVAILABLE_SPACE_KB" != "0" ] && [ "$AVAILABLE_SPACE_KB" -lt 1048576 ]; then
     AVAILABLE_SPACE_GB=$(awk "BEGIN {printf \"%.1f\", $AVAILABLE_SPACE_KB/1024/1024}")
     log_output "⚠️  Warning: Low disk space detected (${AVAILABLE_SPACE_GB} GB available)."
-    if [ "${UNCOMPRESSED}" = "true" ]; then
+    if [ "${EXPORT_FORMAT}" = "folder" ]; then
+      log_output "   Exports may fail if there's not enough space for the folder backups."
+    elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
       log_output "   Exports may fail if there's not enough space for the uncompressed backups."
     else
       log_output "   Exports may fail if there's not enough space for the compressed backups."
@@ -1477,40 +1548,47 @@ if command -v df &> /dev/null; then
   fi
 fi
 
-# Prompt for compression if not already specified
-if [ "${UNCOMPRESSED}" != "true" ]; then
+# Prompt for export format if not already specified via command-line
+if [ "${EXPORT_FORMAT}" = "compressed" ]; then
   # Check if we're in an interactive terminal
   if [ -t 0 ]; then
     echo ""
-    echo "📦 Compression Options:"
-    echo "   Compressed (.tar.gz):   Smaller files, slower export, more memory usage"
-    echo "   Uncompressed (.tar):    Larger files, faster export, less memory usage"
+    echo "📦 Export Format Options:"
+    echo "   [1] Compressed (.tar.gz):   Smaller files, slower export, more memory usage"
+    echo "   [2] Uncompressed (.tar):    Larger files, faster export, less memory usage"
+    echo "   [3] Folder:                 Plain directory, fastest, easy file access"
     echo ""
-    echo "   💡 Tip: For very large PVCs (>1TB), uncompressed is recommended"
+    echo "   💡 Tip: For very large PVCs (>1TB), uncompressed or folder is recommended"
     echo ""
     while true; do
-      read -p "   Use compression? (Y/n): " COMPRESS_CHOICE
-      COMPRESS_CHOICE=$(echo "${COMPRESS_CHOICE}" | tr '[:upper:]' '[:lower:]')
-      if [ -z "${COMPRESS_CHOICE}" ] || [ "${COMPRESS_CHOICE}" = "y" ] || [ "${COMPRESS_CHOICE}" = "yes" ]; then
-        UNCOMPRESSED=false
+      read -p "   Choose format [1/2/3] (default: 1): " FORMAT_CHOICE
+      FORMAT_CHOICE=$(echo "${FORMAT_CHOICE}" | tr '[:upper:]' '[:lower:]')
+      if [ -z "${FORMAT_CHOICE}" ] || [ "${FORMAT_CHOICE}" = "1" ]; then
+        EXPORT_FORMAT="compressed"
         log_output "✓ Using compressed export (.tar.gz)"
         break
-      elif [ "${COMPRESS_CHOICE}" = "n" ] || [ "${COMPRESS_CHOICE}" = "no" ]; then
-        UNCOMPRESSED=true
+      elif [ "${FORMAT_CHOICE}" = "2" ]; then
+        EXPORT_FORMAT="uncompressed"
         log_output "✓ Using uncompressed export (.tar)"
         break
+      elif [ "${FORMAT_CHOICE}" = "3" ]; then
+        EXPORT_FORMAT="folder"
+        log_output "✓ Using folder export (plain directory)"
+        break
       else
-        echo "   Please enter 'y' or 'n'"
+        echo "   Please enter 1, 2, or 3"
       fi
     done
     echo ""
   else
     # Non-interactive mode: default to compressed
     log_output "ℹ️  Non-interactive mode: using compressed export (.tar.gz)"
-    log_output "   (Use --uncompressed flag to skip compression)"
+    log_output "   (Use --uncompressed or --folder flag to change format)"
   fi
-else
+elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
   log_output "ℹ️  Using uncompressed export (.tar) as specified by --uncompressed flag"
+elif [ "${EXPORT_FORMAT}" = "folder" ]; then
+  log_output "ℹ️  Using folder export (plain directory) as specified by --folder flag"
 fi
 
 # Pre-check all PVCs and get user confirmations
@@ -1569,12 +1647,17 @@ if [ "${INTERRUPTED}" = "true" ]; then
       pvc_name=$(parse_pvc_name "$pvc_entry")
       pvc_ns=$(parse_pvc_namespace "$pvc_entry")
       SANITIZED=$(echo "${pvc_name}" | sed 's/[^a-zA-Z0-9._-]/_/g')
-      if [ "${UNCOMPRESSED}" = "true" ]; then
+      if [ "${EXPORT_FORMAT}" = "folder" ]; then
+        OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}"
+      elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
         OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar"
       else
         OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar.gz"
       fi
-      if [ -f "${OUTPUT_FILE}" ]; then
+      if [ "${EXPORT_FORMAT}" = "folder" ] && [ -d "${OUTPUT_FILE}" ]; then
+        FOLDER_SIZE=$(du -sh "${OUTPUT_FILE}" 2>/dev/null | awk '{print $1}' || echo "unknown")
+        log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE}/ (${FOLDER_SIZE})"
+      elif [ -f "${OUTPUT_FILE}" ]; then
         FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null || echo "0")
         FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE/1024/1024}")
         log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE} (${FILE_SIZE_MB} MB)"
@@ -1619,12 +1702,17 @@ if [ ${#SUCCESSFUL_EXPORTS[@]} -gt 0 ]; then
     pvc_name=$(parse_pvc_name "$pvc_entry")
     pvc_ns=$(parse_pvc_namespace "$pvc_entry")
     SANITIZED=$(echo "${pvc_name}" | sed 's/[^a-zA-Z0-9._-]/_/g')
-    if [ "${UNCOMPRESSED}" = "true" ]; then
+    if [ "${EXPORT_FORMAT}" = "folder" ]; then
+      OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}"
+    elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
       OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar"
     else
       OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar.gz"
     fi
-    if [ -f "${OUTPUT_FILE}" ]; then
+    if [ "${EXPORT_FORMAT}" = "folder" ] && [ -d "${OUTPUT_FILE}" ]; then
+      FOLDER_SIZE=$(du -sh "${OUTPUT_FILE}" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE}/ (${FOLDER_SIZE})"
+    elif [ -f "${OUTPUT_FILE}" ]; then
       FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null || echo "0")
       FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE/1024/1024}")
       log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE} (${FILE_SIZE_MB} MB)"

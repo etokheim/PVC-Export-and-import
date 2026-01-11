@@ -11,6 +11,7 @@ I have used it successfully to export and import PVCs ranging from small to larg
 ### Export Script (`pv-export.sh`)
 - ✅ Export single or multiple PVCs in one command
 - ✅ **Per-PVC namespace support** (`pvc@namespace` syntax)
+- ✅ **Multiple export formats**: compressed (.tar.gz), uncompressed (.tar), or plain folder
 - ✅ Custom output directory support
 - ✅ Progress indication (with `pv` tool)
 - ✅ Automatic pod cleanup
@@ -130,6 +131,7 @@ I have used it successfully to export and import PVCs ranging from small to larg
 | `-o` | `--output` | Output directory for exported files | Current directory |
 | `-v` | `--verbose` | Enable verbose/debug output | Disabled |
 | | `--uncompressed` | Use uncompressed tar (faster, less memory, larger files)<br>Recommended for very large PVCs (>1TB) | Disabled |
+| | `--folder` | Export to plain folder (no archive, uses kubectl cp)<br>Best for quick access to files without extraction | Disabled |
 | `-V` | `--version` | Show version information | - |
 | `-h` | `--help` | Show help message | - |
 
@@ -180,6 +182,16 @@ For extremely large PVCs, use the `--uncompressed` flag to reduce memory usage a
 ```
 
 This creates a `.tar` file instead of `.tar.gz`. The export will be faster and use less memory, but the output file will be larger.
+
+#### Export to Plain Folder
+
+For quick access to files without needing to extract an archive:
+
+```bash
+./pv-export.sh --folder -o /mnt/external my-pvc
+```
+
+This creates a folder `my-pvc/` containing all the files from the PVC. Useful when you need to browse or access individual files immediately.
 
 #### Export from Different Namespace
 
@@ -539,7 +551,7 @@ Automated Kubernetes backup scheduling example:
 
 ## Version
 
-- **pv-export.sh**: Version 2.1
+- **pv-export.sh**: Version 2.2
 - **pv-import.sh**: Version 1.0
 
 ## License
@@ -563,6 +575,11 @@ For issues or questions:
 4. Check Kubernetes pod events: `kubectl get events -n <namespace>`
 
 ## Changelog
+
+### pv-export.sh - Version 2.2
+- **NEW**: Export to plain folder with `--folder` flag
+- Interactive format selection: compressed (.tar.gz), uncompressed (.tar), or folder
+- Uses kubectl cp for folder exports for faster file access
 
 ### pv-export.sh - Version 2.1
 - **NEW**: Per-PVC namespace support using `pvc@namespace` syntax
