@@ -1402,14 +1402,22 @@ pre_check_pvcs() {
   local CONFLICT_PVCS=()
   local OVERWRITE_PVCS=()
   local VALID_PVCS=()
+  local CHECK_COUNT=0
+  local TOTAL_COUNT=${#PVC_ENTRIES_ARRAY[@]}
   
   echo "🔍 Pre-checking all PVCs before starting exports..."
   echo ""
   
   for PVC_ENTRY in "${PVC_ENTRIES_ARRAY[@]}"; do
+    CHECK_COUNT=$((CHECK_COUNT + 1))
+    
     # Parse entry to get PVC name and namespace
     local PVC_NAME=$(parse_pvc_name "$PVC_ENTRY")
     local NAMESPACE=$(parse_pvc_namespace "$PVC_ENTRY")
+    
+    # Show spinner while checking this PVC
+    local CHECK_SPINNER=$(get_spinner)
+    printf "\r   ${CHECK_SPINNER} Checking PVC ${CHECK_COUNT}/${TOTAL_COUNT}: ${PVC_NAME}@${NAMESPACE}...          "
     
     # Sanitize PVC name for filename
     SANITIZED_PVC_NAME=$(echo "${PVC_NAME}" | sed 's/[^a-zA-Z0-9._-]/_/g')
@@ -1421,16 +1429,22 @@ pre_check_pvcs() {
       OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}.tar.gz"
     fi
     
-    # Check if PVC exists
+    # Check if PVC exists (with spinner animation)
+    CHECK_SPINNER=$(get_spinner)
+    printf "\r   ${CHECK_SPINNER} Checking PVC ${CHECK_COUNT}/${TOTAL_COUNT}: ${PVC_NAME}@${NAMESPACE}...          "
     if ! ${KUBECTL_CMD} get pvc "${PVC_NAME}" -n "${NAMESPACE}" &>/dev/null; then
+      printf "\r%80s\r" " "
       log_output "❌ PVC '${PVC_NAME}' not found in namespace '${NAMESPACE}'"
       SKIP_PVCS+=("${PVC_ENTRY}")
       continue
     fi
     
-    # Get PVC info
+    # Get PVC info (with spinner animation)
+    CHECK_SPINNER=$(get_spinner)
+    printf "\r   ${CHECK_SPINNER} Checking PVC ${CHECK_COUNT}/${TOTAL_COUNT}: ${PVC_NAME}@${NAMESPACE}...          "
     PVC_INFO=$(${KUBECTL_CMD} get pvc "${PVC_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
     if [ -z "${PVC_INFO}" ]; then
+      printf "\r%80s\r" " "
       log_output "❌ Cannot retrieve information for PVC '${PVC_NAME}'"
       SKIP_PVCS+=("${PVC_ENTRY}")
       continue
@@ -1439,8 +1453,10 @@ pre_check_pvcs() {
     PVC_ACCESS_MODE=$(echo "$PVC_INFO" | jq -r '.spec.accessModes[0] // "unknown"')
     PVC_STATUS=$(echo "$PVC_INFO" | jq -r '.status.phase // "unknown"')
     
-    # Check ReadWriteOnce conflicts
+    # Check ReadWriteOnce conflicts (with spinner animation - this is the slow one)
     if [ "${PVC_ACCESS_MODE}" = "ReadWriteOnce" ] || [ "${PVC_ACCESS_MODE}" = "RWO" ]; then
+      CHECK_SPINNER=$(get_spinner)
+      printf "\r   ${CHECK_SPINNER} Checking PVC ${CHECK_COUNT}/${TOTAL_COUNT}: ${PVC_NAME}@${NAMESPACE} (conflicts)...          "
       MOUNTED_BY=$(${KUBECTL_CMD} get pods --all-namespaces -o json 2>/dev/null | \
         jq -r --arg pvc "${PVC_NAME}" --arg ns "${NAMESPACE}" \
         '.items[] | select(.spec.volumes[]?.persistentVolumeClaim.claimName==$pvc and .metadata.namespace==$ns) | 
@@ -1458,11 +1474,15 @@ pre_check_pvcs() {
     
     # Check PVC status
     if [ "${PVC_STATUS}" != "Bound" ]; then
+      printf "\r%80s\r" " "
       log_output "⚠️  Warning: PVC '${PVC_NAME}' (${NAMESPACE}) is not in 'Bound' status (${PVC_STATUS})"
     fi
     
     VALID_PVCS+=("${PVC_ENTRY}")
   done
+  
+  # Clear the progress line
+  printf "\r%80s\r" " "
   
   echo ""
   
