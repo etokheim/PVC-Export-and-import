@@ -1032,13 +1032,95 @@ export_pvc() {
     mkdir -p "${OUTPUT_PATH}"
     log debug "Starting folder export to ${OUTPUT_PATH}"
     
-    # Use kubectl cp to copy files from pod to local folder
+    # Use kubectl cp to copy files from pod to local folder (run in background for progress)
     TEMP_ERROR_FILE=$(mktemp)
     CURRENT_TEMP_ERROR_FILE="${TEMP_ERROR_FILE}"
-    set +e
-    ${KUBECTL_CMD} cp "${NAMESPACE}/${POD_NAME}:/data/." "${OUTPUT_PATH}/" 2>"${TEMP_ERROR_FILE}"
+    ${KUBECTL_CMD} cp "${NAMESPACE}/${POD_NAME}:/data/." "${OUTPUT_PATH}/" 2>"${TEMP_ERROR_FILE}" &
+    EXPORT_PID=$!
+    CURRENT_EXPORT_PID="${EXPORT_PID}"
+    
+    # Monitor progress with spinner, file count, and folder size
+    local PROGRESS_START=$(date +%s)
+    local PREV_SIZE=0
+    local PREV_COUNT=0
+    local POD_CHECK_COUNTER=0
+    local CURRENT_SIZE=0
+    local CURRENT_COUNT=0
+    local ELAPSED=0
+    local SPEED_BPS=0
+    local SPINNER=""
+    local SIZE_STR=""
+    local COUNT_STR=""
+    local TIME_STR=""
+    
+    log_output "   Copying files to folder..."
+    
+    while kill -0 "${EXPORT_PID}" 2>/dev/null; do
+      # Check pod status every 5 seconds
+      POD_CHECK_COUNTER=$((POD_CHECK_COUNTER + 1))
+      if [ $POD_CHECK_COUNTER -ge 5 ]; then
+        POD_CHECK_COUNTER=0
+        PHASE=$(${KUBECTL_CMD} get pod "${POD_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+        if [ "$PHASE" != "Running" ]; then
+          printf "\r%80s\r" " "
+          log_output "❌ Pod stopped running during export. Phase: $PHASE"
+          kill "${EXPORT_PID}" 2>/dev/null || true
+          wait "${EXPORT_PID}" 2>/dev/null || true
+          ${KUBECTL_CMD} describe pod "${POD_NAME}" -n "${NAMESPACE}" | tail -20 | while read line; do log_output "$line"; done
+          save_pod_logs "${POD_NAME}" "${NAMESPACE}" "${PVC_NAME}"
+          ${KUBECTL_CMD} delete pod "${POD_NAME}" -n "${NAMESPACE}" --ignore-not-found=true
+          rm -rf "${OUTPUT_PATH}"
+          return 1
+        fi
+      fi
+      
+      # Get current folder size and file count
+      if [ -d "${OUTPUT_PATH}" ]; then
+        CURRENT_SIZE=$(du -sk "${OUTPUT_PATH}" 2>/dev/null | awk '{print $1 * 1024}' || echo "0")
+        CURRENT_COUNT=$(find "${OUTPUT_PATH}" -type f 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+      fi
+      ELAPSED=$(($(date +%s) - PROGRESS_START))
+      
+      # Calculate speed
+      SPEED_BPS=0
+      if [ "$CURRENT_SIZE" -gt "$PREV_SIZE" ]; then
+        SPEED_BPS=$((CURRENT_SIZE - PREV_SIZE))
+      fi
+      PREV_SIZE=$CURRENT_SIZE
+      PREV_COUNT=$CURRENT_COUNT
+      
+      # Format display values
+      SPINNER=$(get_spinner)
+      if [ "$CURRENT_SIZE" -ge 1073741824 ]; then
+        SIZE_STR=$(awk "BEGIN {printf \"%.2f GB\", $CURRENT_SIZE/1024/1024/1024}")
+      elif [ "$CURRENT_SIZE" -ge 1048576 ]; then
+        SIZE_STR=$(awk "BEGIN {printf \"%.1f MB\", $CURRENT_SIZE/1024/1024}")
+      else
+        SIZE_STR=$(awk "BEGIN {printf \"%.0f KB\", $CURRENT_SIZE/1024}")
+      fi
+      
+      if [ "$SPEED_BPS" -ge 1048576 ]; then
+        SPEED_STR=$(awk "BEGIN {printf \"%.1f MB/s\", $SPEED_BPS/1024/1024}")
+      elif [ "$SPEED_BPS" -gt 0 ]; then
+        SPEED_STR=$(awk "BEGIN {printf \"%.0f KB/s\", $SPEED_BPS/1024}")
+      else
+        SPEED_STR="--"
+      fi
+      
+      TIME_STR=$(format_time $ELAPSED)
+      COUNT_STR="${CURRENT_COUNT} files"
+      
+      printf "\r   ${SPINNER} ${SIZE_STR} | ${COUNT_STR} | ${SPEED_STR} | ${TIME_STR}     "
+      sleep 1
+    done
+    
+    # Wait for process and get exit code
+    wait "${EXPORT_PID}" 2>/dev/null
     EXIT_CODE=$?
-    set -e
+    CURRENT_EXPORT_PID=""
+    
+    # Clear progress line
+    printf "\r%80s\r" " "
     
     if [ $EXIT_CODE -ne 0 ]; then
       if [ -s "${TEMP_ERROR_FILE}" ]; then
