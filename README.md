@@ -154,7 +154,7 @@ This allows you to export PVCs from multiple namespaces in a single command.
 ./pv-export.sh unifi
 ```
 
-Output: `default-unifi.tar.gz`
+Output: `default@unifi.tar.gz`
 
 #### Export Multiple PVCs
 
@@ -163,9 +163,9 @@ Output: `default-unifi.tar.gz`
 ```
 
 Outputs:
-- `default-database.tar.gz`
-- `default-cache.tar.gz`
-- `default-redis.tar.gz`
+- `default@database.tar.gz`
+- `default@cache.tar.gz`
+- `default@redis.tar.gz`
 
 #### Export to External Drive
 
@@ -236,7 +236,7 @@ The script automatically detects non-interactive environments (like cron jobs) a
 
 ```bash
 # Import from a tar.gz archive (exported by pv-export.sh)
-./pv-import.sh ./default-my-pvc.tar.gz
+./pv-import.sh ./default@my-pvc.tar.gz
 
 # Import from multiple sources
 ./pv-import.sh backup1.tar.gz backup2.tar.gz backup3/
@@ -245,7 +245,7 @@ The script automatically detects non-interactive environments (like cron jobs) a
 ./pv-import.sh ./my-backup-folder
 
 # Import from an uncompressed tar
-./pv-import.sh ./default-my-pvc.tar
+./pv-import.sh ./default@my-pvc.tar
 ```
 
 ### Import Command-Line Options
@@ -271,7 +271,7 @@ The import script is fully interactive and will prompt for:
 #### Import Exported Archive
 
 ```bash
-./pv-import.sh ./default-unifi.tar.gz
+./pv-import.sh ./default@unifi.tar.gz
 ```
 
 The script will:
@@ -377,8 +377,10 @@ Exported files are named using the pattern:
 ```
 
 For example:
-- PVC `unifi` in namespace `default` → `default-unifi.tar.gz`
-- PVC `database` in namespace `production` → `production-database.tar.gz`
+- PVC `unifi` in namespace `default` → `default@unifi.tar.gz`
+- PVC `database` in namespace `production` → `production@database.tar.gz`
+
+The `@` separator makes it easy to distinguish namespace from PVC name, even when both contain hyphens.
 
 Special characters in PVC names are sanitized (replaced with underscores) for filesystem compatibility.
 
