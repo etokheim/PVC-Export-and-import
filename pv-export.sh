@@ -763,16 +763,16 @@ export_pvc() {
   # Sanitize PVC name for filename (replace special chars with underscore)
   SANITIZED_PVC_NAME=$(echo "${PVC_NAME}" | sed 's/[^a-zA-Z0-9._-]/_/g')
   if [ "${EXPORT_FORMAT}" = "folder" ]; then
-    OUTPUT_PATH="${OUTPUT_DIR}/${NAMESPACE}@${SANITIZED_PVC_NAME}"
+    OUTPUT_PATH="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}"
     OUTPUT_FILE="${OUTPUT_PATH}"  # For compatibility with existing code
     log_output "📁 Using folder export (plain directory)"
   elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
-    OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}@${SANITIZED_PVC_NAME}.tar"
+    OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}.tar"
     OUTPUT_PATH="${OUTPUT_FILE}"
     TAR_COMPRESS_FLAG=""
     log_output "📦 Using uncompressed export (faster, less memory, larger output file)"
   else
-    OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}@${SANITIZED_PVC_NAME}.tar.gz"
+    OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}.tar.gz"
     OUTPUT_PATH="${OUTPUT_FILE}"
     TAR_COMPRESS_FLAG="z"
   fi
@@ -1332,11 +1332,11 @@ pre_check_pvcs() {
     # Sanitize PVC name for filename
     SANITIZED_PVC_NAME=$(echo "${PVC_NAME}" | sed 's/[^a-zA-Z0-9._-]/_/g')
     if [ "${EXPORT_FORMAT}" = "folder" ]; then
-      OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}@${SANITIZED_PVC_NAME}"
+      OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}"
     elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
-      OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}@${SANITIZED_PVC_NAME}.tar"
+      OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}.tar"
     else
-      OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}@${SANITIZED_PVC_NAME}.tar.gz"
+      OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED_PVC_NAME}@${NAMESPACE}.tar.gz"
     fi
     
     # Check if PVC exists
@@ -1648,11 +1648,11 @@ if [ "${INTERRUPTED}" = "true" ]; then
       pvc_ns=$(parse_pvc_namespace "$pvc_entry")
       SANITIZED=$(echo "${pvc_name}" | sed 's/[^a-zA-Z0-9._-]/_/g')
       if [ "${EXPORT_FORMAT}" = "folder" ]; then
-        OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}@${SANITIZED}"
+        OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED}@${pvc_ns}"
       elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
-        OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}@${SANITIZED}.tar"
+        OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED}@${pvc_ns}.tar"
       else
-        OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}@${SANITIZED}.tar.gz"
+        OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED}@${pvc_ns}.tar.gz"
       fi
       if [ "${EXPORT_FORMAT}" = "folder" ] && [ -d "${OUTPUT_FILE}" ]; then
         FOLDER_SIZE=$(du -sh "${OUTPUT_FILE}" 2>/dev/null | awk '{print $1}' || echo "unknown")
@@ -1703,11 +1703,11 @@ if [ ${#SUCCESSFUL_EXPORTS[@]} -gt 0 ]; then
     pvc_ns=$(parse_pvc_namespace "$pvc_entry")
     SANITIZED=$(echo "${pvc_name}" | sed 's/[^a-zA-Z0-9._-]/_/g')
     if [ "${EXPORT_FORMAT}" = "folder" ]; then
-      OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}@${SANITIZED}"
+      OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED}@${pvc_ns}"
     elif [ "${EXPORT_FORMAT}" = "uncompressed" ]; then
-      OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}@${SANITIZED}.tar"
+      OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED}@${pvc_ns}.tar"
     else
-      OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}@${SANITIZED}.tar.gz"
+      OUTPUT_FILE="${OUTPUT_DIR}/${SANITIZED}@${pvc_ns}.tar.gz"
     fi
     if [ "${EXPORT_FORMAT}" = "folder" ] && [ -d "${OUTPUT_FILE}" ]; then
       FOLDER_SIZE=$(du -sh "${OUTPUT_FILE}" 2>/dev/null | awk '{print $1}' || echo "unknown")
