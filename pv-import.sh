@@ -650,7 +650,8 @@ get_source_size() {
 }
 
 # Parse source filename to extract suggested namespace and PVC name
-# Expected format: [namespace]-[pvc-name].tar.gz or [namespace]-[pvc-name].tar or folder name
+# Expected format: [pvc-name]@[namespace].tar.gz or [pvc-name]@[namespace].tar or folder name
+# Also supports legacy format: [namespace]-[pvc-name] for backward compatibility
 parse_source_name() {
   local source=$1
   local source_type=$2
@@ -663,11 +664,23 @@ parse_source_name() {
   basename="${basename%.tgz}"
   basename="${basename%.tar}"
   
-  # Try to split by first hyphen (namespace-pvcname format)
-  # This is tricky because PVC names can contain hyphens
-  # We'll try to match against existing namespaces
-  
   echo "${basename}"
+}
+
+# Extract PVC name and namespace from parsed filename
+# Returns: "pvc_name|namespace" or just "pvc_name|" if no namespace found
+parse_pvc_and_namespace() {
+  local parsed_name=$1
+  
+  # Check for new format: pvcname@namespace
+  if [[ "${parsed_name}" == *"@"* ]]; then
+    local pvc_name="${parsed_name%%@*}"
+    local namespace="${parsed_name#*@}"
+    echo "${pvc_name}|${namespace}"
+  else
+    # Legacy format or no namespace - return just the name
+    echo "${parsed_name}|"
+  fi
 }
 
 # Suggest PVC size based on source size (with some padding)
@@ -827,13 +840,27 @@ prompt_for_target() {
   local suggested_namespace="default"
   local suggested_pvc_name="${parsed_name}"
   
-  # Try to extract namespace from parsed name (format: namespace-pvcname)
-  # Check if the part before first hyphen is an existing namespace
-  local potential_ns=$(echo "${parsed_name}" | cut -d'-' -f1)
-  if namespace_exists "${potential_ns}"; then
-    suggested_namespace="${potential_ns}"
-    # Remove namespace prefix from PVC name
-    suggested_pvc_name=$(echo "${parsed_name}" | cut -d'-' -f2-)
+  # Try to extract namespace and PVC name from parsed name
+  # New format: pvcname@namespace (e.g., my-pvc@production)
+  # Legacy format: namespace-pvcname (e.g., production-my-pvc)
+  local parsed_result=$(parse_pvc_and_namespace "${parsed_name}")
+  local extracted_pvc=$(echo "${parsed_result}" | cut -d'|' -f1)
+  local extracted_ns=$(echo "${parsed_result}" | cut -d'|' -f2)
+  
+  if [ -n "${extracted_ns}" ]; then
+    # New format detected (pvc@namespace)
+    suggested_pvc_name="${extracted_pvc}"
+    if namespace_exists "${extracted_ns}"; then
+      suggested_namespace="${extracted_ns}"
+    fi
+  else
+    # Try legacy format: namespace-pvcname (check if first part is a namespace)
+    local potential_ns=$(echo "${parsed_name}" | cut -d'-' -f1)
+    if namespace_exists "${potential_ns}"; then
+      suggested_namespace="${potential_ns}"
+      # Remove namespace prefix from PVC name
+      suggested_pvc_name=$(echo "${parsed_name}" | cut -d'-' -f2-)
+    fi
   fi
   
   # Get available namespaces for selection
@@ -1527,7 +1554,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Examples:"
       echo "  $0 ./my-backup-folder"
-      echo "  $0 ./default-my-pvc.tar.gz"
+      echo "  $0 ./my-pvc@default.tar.gz"
       echo "  $0 backup1.tar.gz backup2.tar.gz backup3/"
       echo ""
       echo "The script will prompt for target PVC and other options interactively."
