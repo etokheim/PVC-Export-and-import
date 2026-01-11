@@ -10,6 +10,7 @@ I have used it successfully to export and import PVCs ranging from small to larg
 
 ### Export Script (`pv-export.sh`)
 - ✅ Export single or multiple PVCs in one command
+- ✅ **Per-PVC namespace support** (`pvc@namespace` syntax)
 - ✅ Custom output directory support
 - ✅ Progress indication (with `pv` tool)
 - ✅ Automatic pod cleanup
@@ -101,8 +102,18 @@ I have used it successfully to export and import PVCs ranging from small to larg
 # Export multiple PVCs
 ./pv-export.sh pvc1 pvc2 pvc3
 
-# Export with custom namespace
+# Export with custom namespace (applies to all PVCs)
 ./pv-export.sh -n production my-pvc
+
+# Export with per-PVC namespace using @ syntax
+./pv-export.sh my-pvc@production
+
+# Export PVCs from different namespaces in one command
+./pv-export.sh pvc1@namespace1 pvc2@namespace2 pvc3@namespace3
+
+# Mix default namespace and per-PVC namespace
+./pv-export.sh -n staging pvc1 pvc2@production pvc3
+# pvc1 uses 'staging', pvc2 uses 'production', pvc3 uses 'staging'
 
 # Export to specific directory
 ./pv-export.sh -o /backup/my-exports my-pvc
@@ -115,12 +126,23 @@ I have used it successfully to export and import PVCs ranging from small to larg
 
 | Option | Long Form | Description | Default |
 |--------|-----------|-------------|---------|
-| `-n` | `--namespace` | Kubernetes namespace | `default` |
+| `-n` | `--namespace` | Default Kubernetes namespace for PVCs without `@namespace` | `default` |
 | `-o` | `--output` | Output directory for exported files | Current directory |
 | `-v` | `--verbose` | Enable verbose/debug output | Disabled |
 | | `--uncompressed` | Use uncompressed tar (faster, less memory, larger files)<br>Recommended for very large PVCs (>1TB) | Disabled |
 | `-V` | `--version` | Show version information | - |
 | `-h` | `--help` | Show help message | - |
+
+### PVC Naming with Namespaces
+
+You can specify the namespace per-PVC using the `@namespace` suffix:
+
+| Format | Description |
+|--------|-------------|
+| `pvc-name` | Uses the default namespace (`-n` option or `default`) |
+| `pvc-name@namespace` | Uses the specified namespace |
+
+This allows you to export PVCs from multiple namespaces in a single command.
 
 ### Export Examples
 
@@ -162,7 +184,19 @@ This creates a `.tar` file instead of `.tar.gz`. The export will be faster and u
 #### Export from Different Namespace
 
 ```bash
+# Using -n flag (all PVCs use the same namespace)
 ./pv-export.sh -n production app-data user-data
+```
+
+#### Export from Multiple Namespaces
+
+```bash
+# Using @ syntax to specify namespace per-PVC
+./pv-export.sh database@production cache@staging logs@monitoring
+
+# Mix: some PVCs use default namespace, others specify their own
+./pv-export.sh -n production app-data user-data config@staging
+# app-data and user-data use 'production', config uses 'staging'
 ```
 
 #### Verbose Mode
@@ -505,7 +539,7 @@ Automated Kubernetes backup scheduling example:
 
 ## Version
 
-- **pv-export.sh**: Version 2.0
+- **pv-export.sh**: Version 2.1
 - **pv-import.sh**: Version 1.0
 
 ## License
@@ -529,6 +563,11 @@ For issues or questions:
 4. Check Kubernetes pod events: `kubectl get events -n <namespace>`
 
 ## Changelog
+
+### pv-export.sh - Version 2.1
+- **NEW**: Per-PVC namespace support using `pvc@namespace` syntax
+- Export PVCs from multiple namespaces in a single command
+- `-n` flag now sets the default namespace for PVCs without `@namespace`
 
 ### pv-export.sh - Version 2.0
 - Added support for multiple PVC exports

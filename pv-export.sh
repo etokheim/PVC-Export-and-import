@@ -6,7 +6,7 @@
 # Exports the contents of Kubernetes PersistentVolumeClaims to compressed
 # tar.gz archives. Supports multiple PVCs and custom output directories.
 #
-# Usage: ./pv-export.sh [-n namespace] [-o output-dir] [-v] <pvc-name> [...]
+# Usage: ./pv-export.sh [-n namespace] [-o output-dir] [-v] <pvc-name[@namespace]> [...]
 #
 # Author: Auto-generated script
 # Version: 2.0
@@ -19,7 +19,7 @@ set -e
 set -u
 
 # Script version
-SCRIPT_VERSION="2.0"
+SCRIPT_VERSION="2.1"
 
 # Get script directory for log file
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +37,35 @@ LOG_FILE=""  # Will be set when logging is initialized
 # Log directories
 LOG_DIR="${SCRIPT_DIR}/logs"
 POD_LOG_DIR="${SCRIPT_DIR}/logs/pod_logs"
+
+# Helper functions for parsing pvc@namespace format
+# Extract PVC name from "pvc@namespace" format
+parse_pvc_name() {
+  local entry=$1
+  echo "${entry%%@*}"
+}
+
+# Extract namespace from "pvc@namespace" format
+parse_pvc_namespace() {
+  local entry=$1
+  if [[ "$entry" == *"@"* ]]; then
+    echo "${entry#*@}"
+  else
+    echo ""
+  fi
+}
+
+# Format PVC entry for display (shows namespace if different from default or if mixed namespaces)
+format_pvc_display() {
+  local entry=$1
+  local pvc_name=$(parse_pvc_name "$entry")
+  local pvc_ns=$(parse_pvc_namespace "$entry")
+  if [ -n "$pvc_ns" ]; then
+    echo "${pvc_name} (${pvc_ns})"
+  else
+    echo "${pvc_name}"
+  fi
+}
 
 # Initialize log file and directories
 init_log_file() {
@@ -607,10 +636,10 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     -h|--help)
-      echo "Usage: $0 [-n|--namespace namespace] [-o|--output directory] [--uncompressed] <pvc-name> [pvc-name2 ...]"
+      echo "Usage: $0 [-n|--namespace namespace] [-o|--output directory] [--uncompressed] <pvc-name[@namespace]> [...]"
       echo ""
       echo "Options:"
-      echo "  -n, --namespace    Kubernetes namespace (default: default)"
+      echo "  -n, --namespace    Default Kubernetes namespace for PVCs without @namespace (default: default)"
       echo "  -o, --output       Output directory for exported files (default: current directory)"
       echo "  -v, --verbose      Enable verbose output"
       echo "  --uncompressed     Use uncompressed tar (faster, less memory, larger files)"
@@ -618,11 +647,18 @@ while [[ $# -gt 0 ]]; do
       echo "  -V, --version      Show version information"
       echo "  -h, --help         Show this help message"
       echo ""
+      echo "PVC Naming:"
+      echo "  You can specify the namespace per-PVC using the @namespace suffix:"
+      echo "    pvc-name              Uses the default namespace (-n or 'default')"
+      echo "    pvc-name@namespace    Uses the specified namespace"
+      echo ""
       echo "Examples:"
-      echo "  $0 my-pvc"
-      echo "  $0 -n default my-pvc other-pvc"
-      echo "  $0 -o /backup pvc1 pvc2 pvc3"
-      echo "  $0 -n production -o /mnt/external pvc1 pvc2"
+      echo "  $0 my-pvc                                    # Uses 'default' namespace"
+      echo "  $0 -n myns my-pvc                            # Uses 'myns' namespace"
+      echo "  $0 my-pvc@production                         # Uses 'production' namespace"
+      echo "  $0 pvc1@ns1 pvc2@ns2 pvc3@ns3                 # Multiple namespaces"
+      echo "  $0 -n default pvc1 pvc2@other                # Mix: pvc1 uses 'default', pvc2 uses 'other'"
+      echo "  $0 -o /backup pvc1@prod pvc2@staging"
       exit 0
       ;;
     *)
@@ -632,14 +668,43 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Check if we have any PVCs before processing
 if [ ${#PVC_NAMES[@]} -eq 0 ]; then
   echo "❌ Error: At least one PVC name is required"
   echo ""
-  echo "Usage: $0 [-n|--namespace namespace] [-o|--output directory] <pvc-name> [pvc-name2 ...]"
-  echo "Example: $0 my-pvc"
-  echo "Example: $0 -n default my-pvc other-pvc"
-  echo "Example: $0 -o /backup pvc1 pvc2"
+  echo "Usage: $0 [-n|--namespace namespace] [-o|--output directory] <pvc-name[@namespace]> [...]"
+  echo "Example: $0 my-pvc                         # Uses 'default' namespace"
+  echo "Example: $0 my-pvc@production              # Uses 'production' namespace"
+  echo "Example: $0 pvc1@ns1 pvc2@ns2              # Multiple namespaces"
+  echo "Example: $0 -n myns pvc1 pvc2@other        # Mix default and per-PVC namespaces"
   exit 1
+fi
+
+# Normalize PVC entries: ensure all entries have namespace (use default if not specified)
+# Store as "pvc@namespace" format internally
+PVC_ENTRIES=()
+for entry in "${PVC_NAMES[@]}"; do
+  if [[ "$entry" == *"@"* ]]; then
+    # Already has namespace
+    PVC_ENTRIES+=("$entry")
+  else
+    # Add default namespace
+    PVC_ENTRIES+=("${entry}@${NAMESPACE}")
+  fi
+done
+PVC_NAMES=("${PVC_ENTRIES[@]}")
+
+# Check if we have multiple namespaces (for display purposes)
+UNIQUE_NAMESPACES=()
+for entry in "${PVC_NAMES[@]}"; do
+  ns=$(parse_pvc_namespace "$entry")
+  if [[ ! " ${UNIQUE_NAMESPACES[*]:-} " =~ " ${ns} " ]]; then
+    UNIQUE_NAMESPACES+=("$ns")
+  fi
+done
+MULTI_NAMESPACE_MODE=false
+if [ ${#UNIQUE_NAMESPACES[@]} -gt 1 ]; then
+  MULTI_NAMESPACE_MODE=true
 fi
 
 # Check dependencies (prompts only, no install yet)
@@ -1179,10 +1244,10 @@ export_pvc() {
 }
 
 # Function to pre-check all PVCs and get user confirmations before starting exports
+# PVC entries are in "pvc@namespace" format
 pre_check_pvcs() {
-  local NAMESPACE=$1
-  local OUTPUT_DIR=$2
-  local PVC_NAMES_ARRAY=("${@:3}")
+  local OUTPUT_DIR=$1
+  local PVC_ENTRIES_ARRAY=("${@:2}")
   
   local SKIP_PVCS=()
   local CONFLICT_PVCS=()
@@ -1192,7 +1257,11 @@ pre_check_pvcs() {
   echo "🔍 Pre-checking all PVCs before starting exports..."
   echo ""
   
-  for PVC_NAME in "${PVC_NAMES_ARRAY[@]}"; do
+  for PVC_ENTRY in "${PVC_ENTRIES_ARRAY[@]}"; do
+    # Parse entry to get PVC name and namespace
+    local PVC_NAME=$(parse_pvc_name "$PVC_ENTRY")
+    local NAMESPACE=$(parse_pvc_namespace "$PVC_ENTRY")
+    
     # Sanitize PVC name for filename
     SANITIZED_PVC_NAME=$(echo "${PVC_NAME}" | sed 's/[^a-zA-Z0-9._-]/_/g')
     if [ "${UNCOMPRESSED}" = "true" ]; then
@@ -1204,7 +1273,7 @@ pre_check_pvcs() {
     # Check if PVC exists
     if ! ${KUBECTL_CMD} get pvc "${PVC_NAME}" -n "${NAMESPACE}" &>/dev/null; then
       log_output "❌ PVC '${PVC_NAME}' not found in namespace '${NAMESPACE}'"
-      SKIP_PVCS+=("${PVC_NAME}")
+      SKIP_PVCS+=("${PVC_ENTRY}")
       continue
     fi
     
@@ -1212,7 +1281,7 @@ pre_check_pvcs() {
     PVC_INFO=$(${KUBECTL_CMD} get pvc "${PVC_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null)
     if [ -z "${PVC_INFO}" ]; then
       log_output "❌ Cannot retrieve information for PVC '${PVC_NAME}'"
-      SKIP_PVCS+=("${PVC_NAME}")
+      SKIP_PVCS+=("${PVC_ENTRY}")
       continue
     fi
     
@@ -1227,21 +1296,21 @@ pre_check_pvcs() {
         "\(.metadata.namespace)/\(.metadata.name) [\(.status.phase)]"' 2>/dev/null || echo "")
       
       if [ -n "${MOUNTED_BY}" ]; then
-        CONFLICT_PVCS+=("${PVC_NAME}|${MOUNTED_BY}")
+        CONFLICT_PVCS+=("${PVC_ENTRY}|${MOUNTED_BY}")
       fi
     fi
     
     # Check for existing output files
     if [ -f "${OUTPUT_FILE}" ]; then
-      OVERWRITE_PVCS+=("${PVC_NAME}|${OUTPUT_FILE}")
+      OVERWRITE_PVCS+=("${PVC_ENTRY}|${OUTPUT_FILE}")
     fi
     
     # Check PVC status
     if [ "${PVC_STATUS}" != "Bound" ]; then
-      log_output "⚠️  Warning: PVC '${PVC_NAME}' is not in 'Bound' status (${PVC_STATUS})"
+      log_output "⚠️  Warning: PVC '${PVC_NAME}' (${NAMESPACE}) is not in 'Bound' status (${PVC_STATUS})"
     fi
     
-    VALID_PVCS+=("${PVC_NAME}")
+    VALID_PVCS+=("${PVC_ENTRY}")
   done
   
   echo ""
@@ -1251,9 +1320,11 @@ pre_check_pvcs() {
     log_output "⚠️  ReadWriteOnce PVC Conflicts Detected:"
     log_output ""
     for conflict in "${CONFLICT_PVCS[@]}"; do
-      PVC_NAME=$(echo "$conflict" | cut -d'|' -f1)
+      PVC_ENTRY=$(echo "$conflict" | cut -d'|' -f1)
       MOUNTED_BY=$(echo "$conflict" | cut -d'|' -f2-)
-      log_output "  - ${PVC_NAME} is mounted by:"
+      local disp_pvc=$(parse_pvc_name "$PVC_ENTRY")
+      local disp_ns=$(parse_pvc_namespace "$PVC_ENTRY")
+      log_output "  - ${disp_pvc} (${disp_ns}) is mounted by:"
       echo "${MOUNTED_BY}" | sed 's/^/    /' | while read line; do log_output "$line"; done
       log_output ""
     done
@@ -1271,16 +1342,16 @@ pre_check_pvcs() {
     fi
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
       for conflict in "${CONFLICT_PVCS[@]}"; do
-        PVC_NAME=$(echo "$conflict" | cut -d'|' -f1)
-        SKIP_PVCS+=("${PVC_NAME}")
+        PVC_ENTRY=$(echo "$conflict" | cut -d'|' -f1)
+        SKIP_PVCS+=("${PVC_ENTRY}")
         # Remove from VALID_PVCS
         local NEW_VALID=()
-        for v in "${VALID_PVCS[@]}"; do
-          if [ "$v" != "${PVC_NAME}" ]; then
+        for v in ${VALID_PVCS[@]+"${VALID_PVCS[@]}"}; do
+          if [ "$v" != "${PVC_ENTRY}" ]; then
             NEW_VALID+=("$v")
           fi
         done
-        VALID_PVCS=("${NEW_VALID[@]}")
+        VALID_PVCS=(${NEW_VALID[@]+"${NEW_VALID[@]}"})
       done
     fi
     log_output ""
@@ -1291,9 +1362,11 @@ pre_check_pvcs() {
     log_output "⚠️  Existing Output Files Detected:"
     log_output ""
     for overwrite in "${OVERWRITE_PVCS[@]}"; do
-      PVC_NAME=$(echo "$overwrite" | cut -d'|' -f1)
+      PVC_ENTRY=$(echo "$overwrite" | cut -d'|' -f1)
       OUTPUT_FILE=$(echo "$overwrite" | cut -d'|' -f2)
-      log_output "  - ${PVC_NAME}: ${OUTPUT_FILE}"
+      local disp_pvc=$(parse_pvc_name "$PVC_ENTRY")
+      local disp_ns=$(parse_pvc_namespace "$PVC_ENTRY")
+      log_output "  - ${disp_pvc} (${disp_ns}): ${OUTPUT_FILE}"
     done
     log_output ""
     if [ -t 0 ]; then
@@ -1306,16 +1379,16 @@ pre_check_pvcs() {
     fi
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
       for overwrite in "${OVERWRITE_PVCS[@]}"; do
-        PVC_NAME=$(echo "$overwrite" | cut -d'|' -f1)
-        SKIP_PVCS+=("${PVC_NAME}")
+        PVC_ENTRY=$(echo "$overwrite" | cut -d'|' -f1)
+        SKIP_PVCS+=("${PVC_ENTRY}")
         # Remove from VALID_PVCS
         local NEW_VALID=()
-        for v in "${VALID_PVCS[@]}"; do
-          if [ "$v" != "${PVC_NAME}" ]; then
+        for v in ${VALID_PVCS[@]+"${VALID_PVCS[@]}"}; do
+          if [ "$v" != "${PVC_ENTRY}" ]; then
             NEW_VALID+=("$v")
           fi
         done
-        VALID_PVCS=("${NEW_VALID[@]}")
+        VALID_PVCS=(${NEW_VALID[@]+"${NEW_VALID[@]}"})
       done
     else
       # Remove existing files
@@ -1330,8 +1403,10 @@ pre_check_pvcs() {
   # Summary
   if [ ${#SKIP_PVCS[@]} -gt 0 ]; then
     log_output "📋 PVCs to skip: ${#SKIP_PVCS[@]}"
-    for pvc in "${SKIP_PVCS[@]}"; do
-      log_output "   - ${pvc}"
+    for pvc_entry in "${SKIP_PVCS[@]}"; do
+      local disp_pvc=$(parse_pvc_name "$pvc_entry")
+      local disp_ns=$(parse_pvc_namespace "$pvc_entry")
+      log_output "   - ${disp_pvc} (${disp_ns})"
     done
     log_output ""
   fi
@@ -1346,8 +1421,9 @@ pre_check_pvcs() {
   
   # Export the arrays (using a hack with eval since bash doesn't support returning arrays)
   # We'll use global variables instead
-  PRE_CHECK_SKIP_PVCS=("${SKIP_PVCS[@]}")
-  PRE_CHECK_VALID_PVCS=("${VALID_PVCS[@]}")
+  # Use ${array[@]+"${array[@]}"} syntax to handle empty arrays with set -u
+  PRE_CHECK_SKIP_PVCS=(${SKIP_PVCS[@]+"${SKIP_PVCS[@]}"})
+  PRE_CHECK_VALID_PVCS=(${VALID_PVCS[@]+"${VALID_PVCS[@]}"})
   
   return 0
 }
@@ -1367,11 +1443,21 @@ log_output "=========================================="
 log_output "PVC Export Script"
 log_output "=========================================="
 log_output "  Kubernetes:    ${KUBECTL_CMD}"
-log_output "  Namespace:     ${NAMESPACE}"
+if [ "${MULTI_NAMESPACE_MODE}" = "true" ]; then
+  log_output "  Namespaces:    multiple (${#UNIQUE_NAMESPACES[@]})"
+else
+  log_output "  Namespace:     ${UNIQUE_NAMESPACES[0]}"
+fi
 log_output "  Output dir:    ${OUTPUT_DIR}"
 log_output "  PVCs to export: ${#PVC_NAMES[@]}"
-for pvc in "${PVC_NAMES[@]}"; do
-  log_output "    - ${pvc}"
+for entry in "${PVC_NAMES[@]}"; do
+  pvc_name=$(parse_pvc_name "$entry")
+  pvc_ns=$(parse_pvc_namespace "$entry")
+  if [ "${MULTI_NAMESPACE_MODE}" = "true" ]; then
+    log_output "    - ${pvc_name} (${pvc_ns})"
+  else
+    log_output "    - ${pvc_name}"
+  fi
 done
 log_output ""
 
@@ -1430,7 +1516,7 @@ fi
 # Pre-check all PVCs and get user confirmations
 PRE_CHECK_SKIP_PVCS=()
 PRE_CHECK_VALID_PVCS=()
-if ! pre_check_pvcs "${NAMESPACE}" "${OUTPUT_DIR}" "${PVC_NAMES[@]}"; then
+if ! pre_check_pvcs "${OUTPUT_DIR}" "${PVC_NAMES[@]}"; then
   log_output "❌ Pre-check failed. Exiting."
   exit 1
 fi
@@ -1439,7 +1525,7 @@ fi
 TOTAL=${#PRE_CHECK_VALID_PVCS[@]}
 EXPORT_NUM=0
 
-for PVC_NAME in "${PRE_CHECK_VALID_PVCS[@]}"; do
+for PVC_ENTRY in "${PRE_CHECK_VALID_PVCS[@]}"; do
   # Check if script was interrupted
   if [ "${INTERRUPTED}" = "true" ]; then
     echo ""
@@ -1447,10 +1533,14 @@ for PVC_NAME in "${PRE_CHECK_VALID_PVCS[@]}"; do
     break
   fi
   
+  # Parse entry to get PVC name and namespace
+  PVC_NAME=$(parse_pvc_name "$PVC_ENTRY")
+  PVC_NAMESPACE=$(parse_pvc_namespace "$PVC_ENTRY")
+  
   EXPORT_NUM=$((EXPORT_NUM + 1))
   
-  if export_pvc "${PVC_NAME}" "${NAMESPACE}" "${EXPORT_NUM}" "${TOTAL}" "${OUTPUT_DIR}"; then
-    SUCCESSFUL_EXPORTS+=("${PVC_NAME}")
+  if export_pvc "${PVC_NAME}" "${PVC_NAMESPACE}" "${EXPORT_NUM}" "${TOTAL}" "${OUTPUT_DIR}"; then
+    SUCCESSFUL_EXPORTS+=("${PVC_ENTRY}")
   else
     # Check if failure was due to interruption
     if [ "${INTERRUPTED}" = "true" ]; then
@@ -1458,7 +1548,7 @@ for PVC_NAME in "${PRE_CHECK_VALID_PVCS[@]}"; do
       echo "⚠️  Export interrupted. Stopping all remaining exports."
       break
     fi
-    FAILED_EXPORTS+=("${PVC_NAME}")
+    FAILED_EXPORTS+=("${PVC_ENTRY}")
   fi
 done
 
@@ -1475,27 +1565,31 @@ if [ "${INTERRUPTED}" = "true" ]; then
   log_output ""
   if [ ${#SUCCESSFUL_EXPORTS[@]} -gt 0 ]; then
     log_output "✅ Successfully exported before interruption:"
-    for pvc in "${SUCCESSFUL_EXPORTS[@]}"; do
-      SANITIZED=$(echo "${pvc}" | sed 's/[^a-zA-Z0-9._-]/_/g')
+    for pvc_entry in "${SUCCESSFUL_EXPORTS[@]}"; do
+      pvc_name=$(parse_pvc_name "$pvc_entry")
+      pvc_ns=$(parse_pvc_namespace "$pvc_entry")
+      SANITIZED=$(echo "${pvc_name}" | sed 's/[^a-zA-Z0-9._-]/_/g')
       if [ "${UNCOMPRESSED}" = "true" ]; then
-        OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED}.tar"
+        OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar"
       else
-        OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED}.tar.gz"
+        OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar.gz"
       fi
       if [ -f "${OUTPUT_FILE}" ]; then
         FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null || echo "0")
         FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE/1024/1024}")
-        log_output "    - ${pvc} → ${OUTPUT_FILE} (${FILE_SIZE_MB} MB)"
+        log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE} (${FILE_SIZE_MB} MB)"
       else
-        log_output "    - ${pvc} → ${OUTPUT_FILE}"
+        log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE}"
       fi
     done
     log_output ""
   fi
   if [ ${#FAILED_EXPORTS[@]} -gt 0 ]; then
     log_output "❌ Failed exports:"
-    for pvc in "${FAILED_EXPORTS[@]}"; do
-      log_output "    - ${pvc}"
+    for pvc_entry in "${FAILED_EXPORTS[@]}"; do
+      pvc_name=$(parse_pvc_name "$pvc_entry")
+      pvc_ns=$(parse_pvc_namespace "$pvc_entry")
+      log_output "    - ${pvc_name} (${pvc_ns})"
     done
     log_output ""
   fi
@@ -1521,19 +1615,21 @@ fi
 
 if [ ${#SUCCESSFUL_EXPORTS[@]} -gt 0 ]; then
   log_output "✅ Successfully exported:"
-  for pvc in "${SUCCESSFUL_EXPORTS[@]}"; do
-    SANITIZED=$(echo "${pvc}" | sed 's/[^a-zA-Z0-9._-]/_/g')
+  for pvc_entry in "${SUCCESSFUL_EXPORTS[@]}"; do
+    pvc_name=$(parse_pvc_name "$pvc_entry")
+    pvc_ns=$(parse_pvc_namespace "$pvc_entry")
+    SANITIZED=$(echo "${pvc_name}" | sed 's/[^a-zA-Z0-9._-]/_/g')
     if [ "${UNCOMPRESSED}" = "true" ]; then
-      OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED}.tar"
+      OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar"
     else
-      OUTPUT_FILE="${OUTPUT_DIR}/${NAMESPACE}-${SANITIZED}.tar.gz"
+      OUTPUT_FILE="${OUTPUT_DIR}/${pvc_ns}-${SANITIZED}.tar.gz"
     fi
     if [ -f "${OUTPUT_FILE}" ]; then
       FILE_SIZE=$(stat -f%z "${OUTPUT_FILE}" 2>/dev/null || stat -c%s "${OUTPUT_FILE}" 2>/dev/null || echo "0")
       FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE/1024/1024}")
-      log_output "    - ${pvc} → ${OUTPUT_FILE} (${FILE_SIZE_MB} MB)"
+      log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE} (${FILE_SIZE_MB} MB)"
     else
-      log_output "    - ${pvc} → ${OUTPUT_FILE}"
+      log_output "    - ${pvc_name} (${pvc_ns}) → ${OUTPUT_FILE}"
     fi
   done
   log_output ""
@@ -1543,8 +1639,10 @@ if [ "${INTERRUPTED}" = "true" ]; then
   exit 130  # Standard exit code for SIGINT (Ctrl+C)
 elif [ ${#FAILED_EXPORTS[@]} -gt 0 ]; then
   log_output "❌ Failed exports:"
-  for pvc in "${FAILED_EXPORTS[@]}"; do
-    log_output "    - ${pvc}"
+  for pvc_entry in "${FAILED_EXPORTS[@]}"; do
+    pvc_name=$(parse_pvc_name "$pvc_entry")
+    pvc_ns=$(parse_pvc_namespace "$pvc_entry")
+    log_output "    - ${pvc_name} (${pvc_ns})"
   done
   log_output ""
   exit 1
@@ -1553,8 +1651,10 @@ fi
 # Show skipped PVCs if any
 if [ ${#PRE_CHECK_SKIP_PVCS[@]} -gt 0 ]; then
   log_output "⏭️  Skipped PVCs (from pre-check):"
-  for pvc in "${PRE_CHECK_SKIP_PVCS[@]}"; do
-    log_output "    - ${pvc}"
+  for pvc_entry in "${PRE_CHECK_SKIP_PVCS[@]}"; do
+    pvc_name=$(parse_pvc_name "$pvc_entry")
+    pvc_ns=$(parse_pvc_namespace "$pvc_entry")
+    log_output "    - ${pvc_name} (${pvc_ns})"
   done
   log_output ""
 fi
