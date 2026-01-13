@@ -1095,6 +1095,7 @@ prompt_data_handling() {
 }
 
 # Check for ReadWriteOnce conflicts
+# Returns 0 if no blocking conflicts, 1 if there are conflicts (import should be skipped)
 check_rwo_conflicts() {
   local index=$1
   local pvc_name="${IMPORT_PVC_NAMES[$index]}"
@@ -1118,73 +1119,54 @@ check_rwo_conflicts() {
   local pods_using_pvc=$(get_pods_using_pvc "${pvc_name}" "${namespace}")
   
   if [ -n "${pods_using_pvc}" ]; then
-    echo ""
-    echo "⚠️  ReadWriteOnce Conflict Detected!"
-    echo "   PVC '${pvc_name}' is mounted by:"
-    echo "${pods_using_pvc}" | sed 's/^/     /'
-    echo ""
-    echo "   The import pod may fail to start while these pods are running."
-    echo "   Consider stopping these pods temporarily."
-    echo ""
-    
-    read -p "   Continue anyway? (y/N): " continue_choice
-    if [[ ! "${continue_choice}" =~ ^[Yy]$ ]]; then
-      return 1
-    fi
+    log_output ""
+    log_output "   ⚠️  ReadWriteOnce Conflict Detected!"
+    log_output "   PVC '${pvc_name}' is mounted by:"
+    echo "${pods_using_pvc}" | sed 's/^/     /' | while read line; do log_output "$line"; done
+    log_output ""
+    log_output "   The import pod cannot start while these pods are running."
+    log_output "   Stop these pods first, then run the import again for this PVC."
+    return 1
   fi
   
   return 0
 }
 
-# Validate all sources before import
-validate_all_sources() {
-  echo ""
-  echo "=========================================="
-  echo "🔍 Validating sources..."
-  echo "=========================================="
+# Validate a single source before import
+# Returns 0 if valid, 1 if invalid
+validate_single_source() {
+  local index=$1
+  local source="${IMPORT_SOURCES[$index]}"
+  local source_type="${IMPORT_SOURCE_TYPES[$index]}"
   
-  local all_valid=true
-  local i=0
+  log_output ""
+  log_output "🔍 Validating source..."
   
-  for source in "${IMPORT_SOURCES[@]}"; do
-    local source_type="${IMPORT_SOURCE_TYPES[$i]}"
-    
-    echo ""
-    echo "  Validating: ${source}"
-    
-    case "${source_type}" in
-      folder)
-        if [ -d "${source}" ] && [ -r "${source}" ]; then
-          echo "    ✓ Folder is readable"
-        else
-          echo "    ❌ Folder is not readable"
-          all_valid=false
-        fi
-        ;;
-      tar|tar.gz)
-        echo -n "    Checking archive integrity... "
-        if validate_tar_archive "${source}" "${source_type}"; then
-          echo "✓"
-        else
-          echo "❌"
-          echo "    ❌ Archive is corrupted or invalid"
-          all_valid=false
-        fi
-        ;;
-    esac
-    
-    i=$((i + 1))
-  done
-  
-  if [ "${all_valid}" = "true" ]; then
-    echo ""
-    echo "✓ All sources validated successfully"
-    return 0
-  else
-    echo ""
-    echo "❌ Some sources failed validation"
-    return 1
-  fi
+  case "${source_type}" in
+    folder)
+      if [ -d "${source}" ] && [ -r "${source}" ]; then
+        log_output "   ✓ Folder is readable"
+        return 0
+      else
+        log_output "   ❌ Folder is not readable"
+        return 1
+      fi
+      ;;
+    tar|tar.gz)
+      log_output "   Checking archive integrity..."
+      if validate_tar_archive "${source}" "${source_type}"; then
+        log_output "   ✓ Archive is valid"
+        return 0
+      else
+        log_output "   ❌ Archive is corrupted or invalid"
+        return 1
+      fi
+      ;;
+    *)
+      log_output "   ⚠️  Unknown source type: ${source_type}"
+      return 1
+      ;;
+  esac
 }
 
 # Create PVC if needed
@@ -1689,32 +1671,6 @@ for i in "${!IMPORT_SOURCES[@]}"; do
   prompt_data_handling "$i"
 done
 
-# Check for ReadWriteOnce conflicts
-echo ""
-echo "=========================================="
-echo "🔍 Checking for conflicts..."
-echo "=========================================="
-
-SKIP_IMPORTS=()
-for i in "${!IMPORT_SOURCES[@]}"; do
-  if ! check_rwo_conflicts "$i"; then
-    SKIP_IMPORTS+=("$i")
-  fi
-done
-
-# Remove skipped imports
-if [ ${#SKIP_IMPORTS[@]} -gt 0 ]; then
-  echo ""
-  echo "⚠️  Some imports will be skipped due to conflicts"
-fi
-
-# Validate all sources
-if ! validate_all_sources; then
-  echo ""
-  echo "❌ Source validation failed. Please fix the issues and try again."
-  exit 1
-fi
-
 # Show summary and confirm
 echo ""
 echo "=========================================="
@@ -1767,18 +1723,25 @@ for i in "${!IMPORT_SOURCES[@]}"; do
     break
   fi
   
-  # Check if this import should be skipped
-  _skip=false
-  for s in "${SKIP_IMPORTS[@]:-}"; do
-    if [ "$s" = "$i" ]; then
-      _skip=true
-      break
-    fi
-  done
+  log_output ""
+  log_output "=========================================="
+  log_output "📦 Preparing import $((i + 1))/${TOTAL}: $(basename "${IMPORT_SOURCES[$i]}")"
+  log_output "=========================================="
   
-  if [ "${_skip}" = "true" ]; then
-    log_output ""
-    log_output "⏭️  Skipping import $((i + 1))/${TOTAL}: $(basename "${IMPORT_SOURCES[$i]}")"
+  # Check for ReadWriteOnce conflicts
+  log_output ""
+  log_output "🔍 Checking for conflicts..."
+  if ! check_rwo_conflicts "$i"; then
+    log_output "⏭️  Skipping import due to conflict"
+    FAILED_IMPORTS+=("${IMPORT_SOURCES[$i]}")
+    continue
+  fi
+  log_output "   ✓ No blocking conflicts"
+  
+  # Validate source
+  if ! validate_single_source "$i"; then
+    log_output "⏭️  Skipping import due to validation failure"
+    FAILED_IMPORTS+=("${IMPORT_SOURCES[$i]}")
     continue
   fi
   
